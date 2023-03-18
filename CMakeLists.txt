@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
 project(elnino-cuda VERSION 0.1 LANGUAGES CXX CUDA)
 
-find_package(Catch2 3 REQUIRED)
-
 add_executable(sw_cuda src/sw_cuda.cu) 
 
 target_compile_features(sw_cuda PUBLIC cxx_std_14)
