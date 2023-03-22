@@ -6,5 +6,5 @@ set_target_properties(sw_cuda PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON)
 target_compile_options(sw_cuda PRIVATE -O3)
 
-add_executable(sw_sequential sw_sequential.cpp)
-target_compile_features(sw_sequential PUBLIC cxx_std_14)
+add_executable(elnino_seq elnino_seq.cpp)
+target_compile_features(elnino_seq PUBLIC cxx_std_14)
