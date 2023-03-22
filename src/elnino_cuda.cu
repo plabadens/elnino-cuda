@@ -1,8 +1,8 @@
 #include <algorithm>
-#include <cuda/std/array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cuda/std/array>
 #include <fstream>
 #include <iostream>
 #include <math.h>
@@ -22,7 +22,7 @@ inline cudaError_t checkCuda(cudaError_t result) {
 }
 
 using real_t = float;
-constexpr int NX = 300, NY = 400;         // number of grid points
+constexpr int NX = 300, NY = 400;            // number of grid points
 constexpr size_t XX = 3000000, YY = 4000000; // size of the grid 3000km x 4000km
 constexpr size_t THREADX = 16, THREADY = 16;
 
@@ -40,13 +40,13 @@ __constant__ real_t BETA;
 
 class Sim_Configuration {
 public:
-  int iter = 500000;   // Number of iterations
-  real_t dt = 200;     // Size of the integration time step
+  int iter = 1000000;  // Number of iterations
+  real_t dt = 100;     // Size of the integration time step
   real_t g = 0.01;     // Gravitational acceleration
   real_t dx = XX / NX; // Integration step size in the horizontal direction
   real_t dy = YY / NY;
   real_t beta = 2e-11;
-  int data_period = 1000; // how often to save coordinate to file
+  int data_period = 10000; // how often to save coordinate to file
   std::string filename =
       "sw_output.data"; // name of the output file with history
   real_t tau_over_D = 0.003;
@@ -86,11 +86,7 @@ public:
         if ((data_period = std::stoi(argument[i + 1])) < 0)
           throw std::invalid_argument(
               "fperiod most be a positive integer (e.g. -fperiod 100)");
-      } /*else if(arg=="--n_gangs"){
-          if ((n_gangs = std::stoi(argument[i+1])) < 0)
-              throw std::invalid_argument("n_gangs most be a positive integer
-          (e.g. -n_gangs 14)");} */
-      else if (arg == "--out") {
+      } else if (arg == "--out") {
         filename = argument[i + 1];
       } else {
         std::cout << "---> error: the argument type is not recognized \n";
@@ -106,24 +102,33 @@ struct water {
   column_t f;
 };
 
-__global__ void initialize_water(grid_t &e, column_t &f) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int j = blockIdx.y * blockDim.y + threadIdx.y;
+__global__ void initialize_water(water &w) {
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < NX;
+       i += blockDim.x * gridDim.x)
+    for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
+         j += blockDim.y * gridDim.y) {
+      if (i > 0 && i < NX - 1 && j > 0 && i < NY - 1) {
+        real_t ii = 100.0 * (i - (NX - 100.0) / 2.0) / NX;
+        real_t jj = 100.0 * (j - (NY - 2.0) / 2.0) / NY;
 
-  real_t ii = 100.0 * (i - (NX - 100.0) / 2.0) / NX;
-  real_t jj = 100.0 * (j - (NY - 2.0) / 2.0) / NY;
-  e[i][j] = expf(-0.02 * (ii * ii + jj * jj));
+        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj));
+        w.u[i][j] = 0;
+        w.v[i][j] = 0;
+      }
 
-  if (i == 0)
-    f[j] = BETA * ((real_t)(NY / 2) - (real_t)(j)) * DY * DT * 1000;
+      if (i == 0) {
+        w.f[j] = BETA * ((real_t)(NY / 2) - (real_t)(j)) * DY;
+      }
+    }
 };
 
 __device__ void integrate_velocity(water &w, int &i, int &j) {
   if (i + 1 < NX && j + 1 < NY) {
     real_t u_t = w.u[i][j];
 
-    w.u[i][j] -= DT / DX * G * (w.e[i + 1][j] - w.e[i][j] + w.f[j] * w.v[i][j]);
-    w.v[i][j] -= DT / DY * G * (w.e[i][j + 1] - w.e[i][j] - w.f[j] * u_t);
+    w.u[i][j] -=
+        DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]) + w.f[j] * w.v[i][j]);
+    w.v[i][j] -= DT * (G / DY * (w.e[i][j + 1] - w.e[i][j]) - w.f[j] * u_t);
   }
 }
 
@@ -141,19 +146,22 @@ __device__ void set_boundary_conditions(water &w, int &i, int &j) {
   }
 }
 
-__device__ void update_elevetion(water &w, int &i, int &j) {
-  w.e[i][j] -= DT / DX * ((w.u[i][j] - w.u[i - 1][j]) + (w.v[i][j] - w.v[i][j - 1]));
+__device__ void update_elevation(water &w, int &i, int &j) {
+  if (i > 0 && j > 0) {
+    w.e[i][j] -= DT * ((w.u[i][j] - w.u[i - 1][j]) / DX +
+                       (w.v[i][j] - w.v[i][j - 1]) / DY);
+  }
 };
 
 __global__ void integrate(water &w) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int j = blockIdx.y * blockDim.y + threadIdx.y;
-
-  integrate_velocity(w, i, j);
-
-  set_boundary_conditions(w, i, j);
-
-  update_elevetion(w, i, j);
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < NX;
+       i += blockDim.x * gridDim.x)
+    for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
+         j += blockDim.y * gridDim.y) {
+      integrate_velocity(w, i, j);
+      set_boundary_conditions(w, i, j);
+      update_elevation(w, i, j);
+    }
 }
 
 void to_file(const std::vector<grid_t> &water_history,
@@ -161,6 +169,16 @@ void to_file(const std::vector<grid_t> &water_history,
   std::ofstream file(filename);
   file.write((const char *)(water_history.data()),
              sizeof(grid_t) * water_history.size());
+}
+
+__host__ __device__ void print_checksum(grid_t &elevation) {
+  real_t sum = 0;
+
+  for (size_t i = 0; i < NX; i++)
+    for (size_t j = 0; j < NY; j++)
+      sum += elevation[i][j];
+
+  printf("checksum: %f \n", sum);
 }
 
 void simulate(const Sim_Configuration config) {
@@ -178,9 +196,12 @@ void simulate(const Sim_Configuration config) {
 
   // Calculate the dimentions of the 2D GPU compute grid
   dim3 threadsPerBlock(THREADX, THREADY);
-  dim3 numBlocks(NY / threadsPerBlock.y, NX / threadsPerBlock.x);
+  dim3 numBlocks(NX / threadsPerBlock.x, NY / threadsPerBlock.y);
 
-  initialize_water<<<numBlocks, threadsPerBlock>>>(d_water_world->e, d_water_world->f);
+  initialize_water<<<numBlocks, threadsPerBlock>>>(*d_water_world);
+  checkCuda(cudaMemcpy(h_elevation, &d_water_world->e, sizeof(grid_t),
+                       cudaMemcpyDeviceToHost));
+  print_checksum(*h_elevation);
 
   std::vector<grid_t> water_history;
   auto begin = std::chrono::steady_clock::now();
@@ -190,20 +211,19 @@ void simulate(const Sim_Configuration config) {
     integrate<<<numBlocks, threadsPerBlock>>>(*d_water_world);
 
     if (t % config.data_period == 0) {
-      checkCuda(cudaMemcpy(h_elevation, &d_water_world->e, sizeof(grid_t), cudaMemcpyDeviceToHost));
-      checkCuda(cudaDeviceSynchronize());
+      checkCuda(cudaMemcpy(h_elevation, &d_water_world->e, sizeof(grid_t),
+                           cudaMemcpyDeviceToHost));
       water_history.push_back(*h_elevation);
     }
   }
 
-  checkCuda(cudaFree(d_water_world));
   checkCuda(cudaDeviceSynchronize());
+  checkCuda(cudaFree(d_water_world));
   auto end = std::chrono::steady_clock::now();
 
   to_file(water_history, config.filename);
 
-  // std::cout << "checksum: " << std::accumulate(water_world.e.front().begin(),
-  // water_world.e.back().end(), 0.0) << "\n";
+  print_checksum(*h_elevation);
   std::cout << "elapsed time: " << (end - begin).count() / 1000000000.0
             << " sec"
             << "\n";
@@ -213,9 +233,9 @@ void simulate(const Sim_Configuration config) {
 
 int main(int argc, char **argv) {
   auto config = Sim_Configuration({argv, argv + argc});
-  // std::cout << "n_gangs:" << config.n_gangs << "\n";
-  std::cout << NX << " x " << NY << "\n";
-  std::cout << config.iter << "\n";
+
+  std::cout << "dimensions: " << NX << "x" << NY << "\n";
+  std::cout << "iterations: " << config.iter << "\n";
 
   simulate(config);
   return 0;
