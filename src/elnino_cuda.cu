@@ -1,5 +1,3 @@
-#include "nvToolsExtCuda.h"
-#include <chrono>
 #include <cuda/std/array>
 #include <fstream>
 #include <iostream>
@@ -17,7 +15,7 @@ inline cudaError_t checkCuda(cudaError_t result) {
   return result;
 }
 
-using real_t = double;
+using real_t = float;
 constexpr int NX = 300, NY = 400;            // number of grid points
 constexpr size_t XX = 3000000, YY = 4000000; // size of the grid 3000km x 4000km
 constexpr size_t THREADX = 16, THREADY = 16;
@@ -207,16 +205,6 @@ __global__ void integrate_elevation(water &w) {
           w.e[i][j] -= DT * w.v[i][j] * (e_up_t - e_mid_t) / DY;
         }
       }
-#ifdef SHAPIRO
-      __threadfence();
-
-      if (i > 0 && i + 1 < NX && j > 0 && j + 1 < NY) {
-        w.e[i][j] =
-            w.e[i][j] * (1 - EPSILON) +
-            EPSILON * 0.25 *
-                (w.e[i][j - 1] + w.e[i][j + 1] + w.e[i - 1][j] + w.e[i + 1][j]);
-      }
-#endif
     }
 }
 
