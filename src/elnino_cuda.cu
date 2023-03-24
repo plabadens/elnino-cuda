@@ -17,7 +17,7 @@ inline cudaError_t checkCuda(cudaError_t result) {
   return result;
 }
 
-using real_t = float;
+using real_t = double;
 constexpr int NX = 300, NY = 400;            // number of grid points
 constexpr size_t XX = 3000000, YY = 4000000; // size of the grid 3000km x 4000km
 constexpr size_t THREADX = 16, THREADY = 16;
@@ -39,13 +39,13 @@ __constant__ real_t TAU_PRIME;
 
 class Sim_Configuration {
 public:
-  int iter = 100000;  // Number of iterations
-  real_t dt = 150;     // Size of the integration time step
+  int iter = 100000;   // Number of iterations
+  real_t dt = 50;     // Size of the integration time step
   real_t g = 0.01;     // Gravitational acceleration
   real_t dx = XX / NX; // Integration step size in the horizontal direction
   real_t dy = YY / NY;
   real_t beta = 2e-11;
-  real_t epsilon = 0.001;
+  real_t epsilon = 1e-4;
   int data_period = 1000; // how often to save coordinate to file
   int data_iter;
   std::string filename =
@@ -143,7 +143,7 @@ __global__ void initialize_water(water &w) {
         real_t ii = 100.0 * (i - (NX - 100.0) / 2.0) / NX;
         real_t jj = 100.0 * (j - (NY - 2.0) / 2.0) / NY;
 
-        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj))*4;
+        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj)) * 4;
         w.u[i][j] = 0;
         w.v[i][j] = 0;
       }
@@ -162,7 +162,7 @@ __global__ void integrate_velocity(water &w) {
          j += blockDim.y * gridDim.y)
       if (i + 1 < NX && j + 1 < NY) {
         real_t u_t = w.u[i][j];
-        real_t u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]) +(TAU - TAU_PRIME * w.e_mean) / 1000 / 100);
+        real_t u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]));
 
         real_t v_t = w.v[i][j];
         real_t v_star = DT * (G / DY * (w.e[i][j + 1] - w.e[i][j]));
@@ -190,20 +190,21 @@ __global__ void integrate_elevation(water &w) {
         w.v[i][NY - 1] = 0;
         w.v[i][NY - 2] = 0;
       }
+      __threadfence();
 
       if (i > 0 && j > 0) {
-        real_t e_mid_t = w.e[i][j] ;
-        real_t e_right_t = w.e[i+1][j]  ;
-        real_t e_up_t = w.e[i][j+1] ;
-        w.e[i][j] -= DT * ((w.u[i][j] - w.u[i - 1][j]) / DX * (e_mid_t+100)+
-                           (w.v[i][j] - w.v[i][j - 1]) / DY * (e_mid_t+100));
-        
+        real_t e_mid_t = w.e[i][j];
+        real_t e_right_t = w.e[i + 1][j];
+        real_t e_up_t = w.e[i][j + 1];
+        w.e[i][j] -= DT * ((w.u[i][j] - w.u[i - 1][j]) / DX * (e_mid_t + 100) +
+                           (w.v[i][j] - w.v[i][j - 1]) / DY * (e_mid_t + 100));
+
         if ((e_right_t - e_mid_t) > 1e-15) {
-                w.e[i][j] -= DT * w.u[i][j]  * (e_right_t - e_mid_t)/DX;
+          w.e[i][j] -= DT * w.u[i][j] * (e_right_t - e_mid_t) / DX;
         }
 
         if ((e_up_t - e_mid_t) > 1e-15) {
-                w.e[i][j] -= DT * w.v[i][j]  * (e_up_t - e_mid_t)/DY;
+          w.e[i][j] -= DT * w.v[i][j] * (e_up_t - e_mid_t) / DY;
         }
       }
 #ifdef SHAPIRO
@@ -217,6 +218,19 @@ __global__ void integrate_elevation(water &w) {
       }
 #endif
     }
+}
+
+__global__ void shapiro_filter(water &w, grid_t &e_t) {
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < NX;
+       i += blockDim.x * gridDim.x)
+    for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
+         j += blockDim.y * gridDim.y)
+      if (i > 0 && i + 1 < NX && j > 0 && j + 1 < NY) {
+        w.e[i][j] =
+            e_t[i][j] * (1 - EPSILON) +
+            EPSILON * 0.25 *
+                (e_t[i][j - 1] + e_t[i][j + 1] + e_t[i - 1][j] + e_t[i + 1][j]);
+      }
 }
 
 void to_file(const grid_t *water_history, const Sim_Configuration config) {
@@ -248,8 +262,14 @@ void print_devices() {
 }
 
 void launch(const Sim_Configuration config) {
+  // Initialize a stream for asynchronous operations
   cudaStream_t stream;
   checkCuda(cudaStreamCreate(&stream));
+
+  // Setup timing using CUDA events
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
 
   // Copy constant to special symbols
   checkCuda(cudaHostRegister((void **)&config, sizeof(config),
@@ -270,10 +290,8 @@ void launch(const Sim_Configuration config) {
       cudaMallocHost(&h_water_history, sizeof(grid_t) * config.data_iter));
   water *d_water_world;
   checkCuda(cudaMallocAsync(&d_water_world, sizeof(water), stream));
-
-  // Allocate a simple checksum variable
-  real_t *d_checksum;
-  checkCuda(cudaMallocAsync(&d_checksum, sizeof(real_t), stream));
+  grid_t *d_tmp_eta;
+  checkCuda(cudaMallocAsync(&d_tmp_eta, sizeof(grid_t), stream));
 
   // Calculate the dimentions of the 2D GPU compute grid
   dim3 threadsPerBlock(THREADX, THREADY);
@@ -281,8 +299,7 @@ void launch(const Sim_Configuration config) {
 
   initialize_water<<<numBlocks, threadsPerBlock, 0, stream>>>(*d_water_world);
 
-  checkCuda(cudaStreamSynchronize(stream));
-  auto begin = std::chrono::steady_clock::now();
+  checkCuda(cudaEventRecord(start, stream));
 
   for (int t = 0; t < config.iter; ++t) {
 
@@ -290,6 +307,11 @@ void launch(const Sim_Configuration config) {
         *d_water_world);
     integrate_elevation<<<numBlocks, threadsPerBlock, 0, stream>>>(
         *d_water_world);
+
+    checkCuda(cudaMemcpyAsync(d_tmp_eta, &d_water_world->e, sizeof(grid_t),
+                              cudaMemcpyDeviceToDevice));
+    shapiro_filter<<<numBlocks, threadsPerBlock, 0, stream>>>(*d_water_world,
+                                                              *d_tmp_eta);
 
     if (t % config.data_period == 0) {
       int i = t / config.data_period;
@@ -305,18 +327,22 @@ void launch(const Sim_Configuration config) {
   }
   printf("\n");
 
-  checkCuda(cudaStreamSynchronize(stream));
-  auto end = std::chrono::steady_clock::now();
+  checkCuda(cudaEventRecord(stop, stream));
 
   checkCuda(cudaFreeAsync(d_water_world, stream));
+  checkCuda(cudaFreeAsync(d_tmp_eta, stream));
+  checkCuda(cudaEventSynchronize(stop));
+
+  float time_ms = 0;
+  checkCuda(cudaEventElapsedTime(&time_ms, start, stop));
+
   checkCuda(cudaStreamDestroy(stream));
 
   print_checksum(h_water_history[0], "first");
   print_checksum(h_water_history[config.data_iter - 1], "last");
 
   to_file(h_water_history, config);
-  std::cout << "elapsed time: " << (end - begin).count() / 1000000000.0
-            << " sec"
+  std::cout << "elapsed time: " << time_ms / 1000 << " sec"
             << "\n";
 
   checkCuda(cudaFreeHost(h_water_history));
