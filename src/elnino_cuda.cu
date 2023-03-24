@@ -39,14 +39,14 @@ __constant__ real_t TAU_PRIME;
 
 class Sim_Configuration {
 public:
-  int iter = 1000000;  // Number of iterations
-  real_t dt = 100;     // Size of the integration time step
+  int iter = 100000;  // Number of iterations
+  real_t dt = 150;     // Size of the integration time step
   real_t g = 0.01;     // Gravitational acceleration
   real_t dx = XX / NX; // Integration step size in the horizontal direction
   real_t dy = YY / NY;
   real_t beta = 2e-11;
   real_t epsilon = 0.001;
-  int data_period = 10000; // how often to save coordinate to file
+  int data_period = 1000; // how often to save coordinate to file
   int data_iter;
   std::string filename =
       "sw_output.data"; // name of the output file with history
@@ -143,7 +143,7 @@ __global__ void initialize_water(water &w) {
         real_t ii = 100.0 * (i - (NX - 100.0) / 2.0) / NX;
         real_t jj = 100.0 * (j - (NY - 2.0) / 2.0) / NY;
 
-        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj));
+        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj))*4;
         w.u[i][j] = 0;
         w.v[i][j] = 0;
       }
@@ -162,8 +162,7 @@ __global__ void integrate_velocity(water &w) {
          j += blockDim.y * gridDim.y)
       if (i + 1 < NX && j + 1 < NY) {
         real_t u_t = w.u[i][j];
-        real_t u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]) +
-                              (TAU - TAU_PRIME * w.e_mean) / 1000 / 100);
+        real_t u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]) +(TAU - TAU_PRIME * w.e_mean) / 1000 / 100);
 
         real_t v_t = w.v[i][j];
         real_t v_star = DT * (G / DY * (w.e[i][j + 1] - w.e[i][j]));
@@ -193,8 +192,19 @@ __global__ void integrate_elevation(water &w) {
       }
 
       if (i > 0 && j > 0) {
-        w.e[i][j] -= DT * ((w.u[i][j] - w.u[i - 1][j]) / DX +
-                           (w.v[i][j] - w.v[i][j - 1]) / DY);
+        real_t e_mid_t = w.e[i][j] ;
+        real_t e_right_t = w.e[i+1][j]  ;
+        real_t e_up_t = w.e[i][j+1] ;
+        w.e[i][j] -= DT * ((w.u[i][j] - w.u[i - 1][j]) / DX * (e_mid_t+100)+
+                           (w.v[i][j] - w.v[i][j - 1]) / DY * (e_mid_t+100));
+        
+        if ((e_right_t - e_mid_t) > 1e-15) {
+                w.e[i][j] -= DT * w.u[i][j]  * (e_right_t - e_mid_t)/DX;
+        }
+
+        if ((e_up_t - e_mid_t) > 1e-15) {
+                w.e[i][j] -= DT * w.v[i][j]  * (e_up_t - e_mid_t)/DY;
+        }
       }
 #ifdef SHAPIRO
       __threadfence();
