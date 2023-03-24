@@ -234,6 +234,19 @@ void print_checksum(grid_t &elevation, const char *label) {
   printf("checksum [%s]: %f \n", label, sum);
 }
 
+void print_devices() {
+  int nDevices;
+
+  printf("devices:\n");
+
+  cudaGetDeviceCount(&nDevices);
+  for (int i = 0; i < nDevices; i++) {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, i);
+    printf("  %d: %s: %d.%d\n", i, prop.name, prop.major, prop.minor);
+  }
+}
+
 void launch(const Sim_Configuration config) {
   cudaStream_t stream;
   checkCuda(cudaStreamCreate(&stream));
@@ -311,6 +324,8 @@ void launch(const Sim_Configuration config) {
 
 int main(int argc, char **argv) {
   auto config = Sim_Configuration({argv, argv + argc});
+
+  print_devices();
 
   std::cout << "dimensions: " << NX << "x" << NY << "\n";
   std::cout << "iterations: " << config.iter << "\n";
