@@ -223,16 +223,23 @@ __global__ void integrate_elevation(water &w) {
     }
 }
 
-__global__ void shapiro_filter(water &w, grid_t &e_t) {
+__global__ void shapiro_filter(grid_t &input, grid_t &output) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < NX;
        i += blockDim.x * gridDim.x)
     for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
          j += blockDim.y * gridDim.y)
-      if (i > 0 && i + 1 < NX && j > 0 && j + 1 < NY) {
-        w.e[i][j] =
-            e_t[i][j] * (1 - EPSILON) +
-            EPSILON * 0.25 *
-                (e_t[i][j - 1] + e_t[i][j + 1] + e_t[i - 1][j] + e_t[i + 1][j]);
+      if (i < NX && j < NY) {
+        real_t sum = 0.0;
+        for (int k = -1; k <= 1; k++) {
+          for (int l = -1; l <= 1; l++) {
+            int x = i + k;
+            int y = j + l;
+            if (x >= 0 && x < NX && y >= 0 && y < NY) {
+              sum += input[x][y];
+            }
+          }
+        }
+        output[i][j] = (1 - EPSILON) * input[i][j] + EPSILON * sum / 9;
       }
 }
 
@@ -312,9 +319,8 @@ void launch(const Sim_Configuration config) {
 
     checkCuda(cudaMemcpyAsync(d_tmp_eta, &d_water_world->e, sizeof(grid_t),
                               cudaMemcpyDeviceToDevice));
-    shapiro_filter<<<numBlocks, threadsPerBlock, 0, stream>>>(*d_water_world,
-                                                              *d_tmp_eta);
-
+    shapiro_filter<<<numBlocks, threadsPerBlock, 0, stream>>>(*d_tmp_eta,
+                                                              d_water_world->e);
     if (t % config.data_period == 0) {
       int i = t / config.data_period;
       printf("\rdata period: %3d / %3d", i + 1, config.data_iter);
