@@ -37,19 +37,20 @@ __constant__ real_t TAU_PRIME;
 
 class Sim_Configuration {
 public:
-  int iter = 100000;   // Number of iterations
-  real_t dt = 50;     // Size of the integration time step
+  uint iter = 500000;   // Number of iterations
+  real_t dt = 100;     // Size of the integration time step
   real_t g = 0.01;     // Gravitational acceleration
   real_t dx = XX / NX; // Integration step size in the horizontal direction
   real_t dy = YY / NY;
   real_t beta = 2e-11;
-  real_t epsilon = 1e-4;
-  int data_period = 1000; // how often to save coordinate to file
-  int data_iter;
+  real_t epsilon = 0.001;
+  uint data_period = 1000; // how often to save coordinate to file
+  uint data_iter;
+  uint wind_stop = 20000;
   std::string filename =
       "sw_output.data"; // name of the output file with history
   real_t tau = 0.01;
-  real_t tau_prime = 0.075;
+  real_t tau_prime = 0.0075;
 
   Sim_Configuration(std::vector<std::string> argument) {
     for (long unsigned int i = 1; i < argument.size(); i += 2) {
