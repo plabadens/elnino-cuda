@@ -142,10 +142,10 @@ __global__ void initialize_water(water &w) {
     for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
          j += blockDim.y * gridDim.y) {
       if (i > 0 && i < NX - 1 && j > 0 && i < NY - 1) {
-        real_t ii = 100.0 * (i - (NX - 100.0) / 2.0) / NX;
+        real_t ii = 100.0 * (i - (NX + 250.0) / 2.0) / NX;
         real_t jj = 100.0 * (j - (NY - 2.0) / 2.0) / NY;
 
-        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj)) * 4;
+        w.e[i][j] = expf(-0.02 * (ii * ii + jj * jj)) * 10;
         w.u[i][j] = 0;
         w.v[i][j] = 0;
       }
@@ -162,14 +162,20 @@ __global__ void initialize_water(water &w) {
     }
 };
 
-__global__ void integrate_velocity(water &w) {
+__global__ void integrate_velocity(water &w, int t, int t_wind_stop) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < NX;
        i += blockDim.x * gridDim.x)
     for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
          j += blockDim.y * gridDim.y)
       if (i + 1 < NX && j + 1 < NY) {
         real_t u_t = w.u[i][j];
-        real_t u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]));
+        real_t u_star;
+        if (t < t_wind_stop) {
+          u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]) +
+                         (TAU - TAU_PRIME * w.e_mean) / 1000 / 100);
+        } else {
+          u_star = DT * (G / DX * (w.e[i + 1][j] - w.e[i][j]));
+        }
 
         real_t v_t = w.v[i][j];
         real_t v_star = DT * (G / DY * (w.e[i][j + 1] - w.e[i][j]));
@@ -197,14 +203,14 @@ __global__ void integrate_elevation(water &w) {
         w.v[i][NY - 1] = 0;
         w.v[i][NY - 2] = 0;
       }
-      __threadfence();
 
       if (i > 0 && j > 0) {
         real_t e_mid_t = w.e[i][j];
         real_t e_right_t = w.e[i + 1][j];
         real_t e_up_t = w.e[i][j + 1];
-        w.e[i][j] -= DT * ((w.u[i][j] - w.u[i - 1][j]) / DX * (e_mid_t + 100) +
-                           (w.v[i][j] - w.v[i][j - 1]) / DY * (e_mid_t + 100));
+        w.e[i][j] -=
+            DT * ((w.u[i][j] - w.u[i - 1][j]) / DX * (e_mid_t + 100) +
+                  (w.v[i][j] - w.v[i][j - 1]) / DY * (e_mid_t + 100));
 
         if ((e_right_t - e_mid_t) > 1e-15) {
           w.e[i][j] -= DT * w.u[i][j] * (e_right_t - e_mid_t) / DX;
@@ -298,10 +304,9 @@ void launch(const Sim_Configuration config) {
 
   checkCuda(cudaEventRecord(start, stream));
 
-  for (int t = 0; t < config.iter; ++t) {
-
+  for (uint t = 0; t < config.iter; t++) {
     integrate_velocity<<<numBlocks, threadsPerBlock, 0, stream>>>(
-        *d_water_world);
+        *d_water_world, t, config.wind_stop);
     integrate_elevation<<<numBlocks, threadsPerBlock, 0, stream>>>(
         *d_water_world);
 
