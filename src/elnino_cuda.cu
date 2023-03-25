@@ -36,12 +36,12 @@ public:
   int nx = 300;
   int ny = 400;
   int grid_dim;
-  real_t dt = 50;     // Size of the integration time step
+  real_t dt = 100;     // Size of the integration time step
   real_t g = 0.01;     // Gravitational acceleration
   real_t dx = XX / nx; // Integration step size in the horizontal direction
   real_t dy = YY / ny;
   real_t beta = 2e-11;
-  real_t epsilon = 0.00001;
+  real_t epsilon = 0;
   int data_period = 1000; // how often to save coordinate to file
   uint data_iter;
   uint wind_stop = 20000;
@@ -71,6 +71,16 @@ public:
         if ((dt = std::stod(argument[i + 1])) < 0)
           throw std::invalid_argument(
               "dt most be a positive real number (e.g. -dt 0.05)");
+      } else if (arg == "--nx") {
+        if ((nx = std::stod(argument[i + 1])) < 0)
+          throw std::invalid_argument(
+              "nx most be a positive real number (e.g. --nx 300)");
+      } else if (arg == "--ny") {
+        if ((ny = std::stod(argument[i + 1])) < 0)
+          throw std::invalid_argument(
+              "ny most be a positive real number (e.g. --ny 400)");
+      } else if (arg == "--eps") {
+        epsilon = std::stod(argument[i + 1]);
       } else if (arg == "--g") {
         g = std::stod(argument[i + 1]);
       } else if (arg == "--fperiod") {
@@ -132,7 +142,7 @@ __global__ void initialize_water(real_t *eta, real_t *u, real_t *v,
     for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
          j += blockDim.y * gridDim.y) {
       if (i > 0 && i < NX - 1 && j > 0 && i < NY - 1) {
-        real_t ii = 100.0 * (i - (NX + 250.0)) / NX;
+        real_t ii = 100.0 * (i - (NX + 250.0) / 2.0) / NX;
         real_t jj = 100.0 * (j - (NY - 2.0) / 2.0) / NY;
 
         *ELEMENT_PTR(eta, pitch, j, i) = expf(-0.02 * (ii * ii + jj * jj)) * 10;
