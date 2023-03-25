@@ -114,23 +114,26 @@ __global__ void update_elevation_mean(water &w) {
        i += blockDim.x * gridDim.x)
     for (int j = blockIdx.y * blockDim.y + threadIdx.y; j < NY;
          j += blockDim.y * gridDim.y) {
-      if (i == 0 && j == 0) {
-        w.e_mean_left = 0;
-        w.e_mean_right = 0;
-      }
-      __threadfence();
-
-      if (i < NX / 2) {
+      if (i < NX / 8 && j >= 7 * NY / 16 && j < 9 * NY / 16) {
         atomicAdd_system(&w.e_mean_left, w.e[i][j]);
-      } else {
+      }
+
+      if (i >= 7 * NX / 8 && i < NX && j >= 7 * NY / 16 && j < 9 * NY / 16) {
         atomicAdd_system(&w.e_mean_right, w.e[i][j]);
       }
-      __threadfence();
-
-      if (i == 0 && j == 0) {
-        w.e_mean = (w.e_mean_left - w.e_mean_right) / (real_t)(NY * NX / 8);
-      }
     }
+  __threadfence();
+
+  if (blockIdx.x * blockDim.x + threadIdx.x == 0 &&
+      blockIdx.y * blockDim.y + threadIdx.y == 0) {
+    w.e_mean_left = w.e_mean_left / (real_t)(NY * NX / 16.0);
+    w.e_mean_right = w.e_mean_right / (real_t)(NY * NX / 16.0);
+
+    w.e_mean = w.e_mean_left - w.e_mean_right;
+
+    w.e_mean_left = 0;
+    w.e_mean_right = 0;
+  }
 }
 
 __global__ void initialize_water(water &w) {
@@ -150,6 +153,11 @@ __global__ void initialize_water(water &w) {
       if (i == 0) {
         w.A[j] = BETA * ((real_t)(NY / 2) - (real_t)(j)) * DY * DT;
         w.B[j] = 0.25 * pow(w.A[j], 2);
+
+        if (j == 0) {
+          w.e_mean_left = 0;
+          w.e_mean_right = 0;
+        }
       }
     }
 };
