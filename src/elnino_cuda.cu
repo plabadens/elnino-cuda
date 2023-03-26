@@ -18,6 +18,8 @@ inline cudaError_t checkCuda(cudaError_t result) {
 using real_t = float;
 constexpr size_t XX = 3000000, YY = 4000000; // size of the grid 3000km x 4000km
 constexpr size_t THREADX = 16, THREADY = 16;
+
+/// Simple macro for pitched memory access
 #define ELEMENT_PTR(base, pitch, row, col)                                     \
   ((real_t *)((char *)base + (row) * (pitch) + (col) * sizeof(real_t)))
 
@@ -36,13 +38,15 @@ public:
   int nx = 300;
   int ny = 400;
   int grid_dim;
-  real_t dt = 100;     // Size of the integration time step
-  real_t g = 0.01;     // Gravitational acceleration
-  real_t dx = XX / nx; // Integration step size in the horizontal direction
-  real_t dy = YY / ny;
+  real_t dt = 100; // Size of the integration time step
+  real_t g = 0.01; // Gravitational acceleration
+  real_t dx;       // Integration step size in the horizontal direction
+  real_t dy;
   real_t beta = 2e-11;
   real_t epsilon = 0;
   int data_period = 1000; // how often to save coordinate to file
+  int num_blocks = -1;
+  int num_threads = -1;
   uint data_iter;
   uint wind_stop = 20000;
   std::string filename =
@@ -83,6 +87,14 @@ public:
         epsilon = std::stod(argument[i + 1]);
       } else if (arg == "--g") {
         g = std::stod(argument[i + 1]);
+      } else if (arg == "--blocks") {
+        if ((num_blocks = std::stoi(argument[i + 1])) < 0)
+          throw std::invalid_argument(
+              "blocks must be a positive integer (e.g. -fperiod 100)");
+      } else if (arg == "--threads") {
+        if ((num_threads = std::stoi(argument[i + 1])) < 0)
+          throw std::invalid_argument(
+              "threads must be a positive integer (e.g. -fperiod 100)");
       } else if (arg == "--fperiod") {
         if ((data_period = std::stoi(argument[i + 1])) < 0)
           throw std::invalid_argument(
@@ -96,6 +108,8 @@ public:
 
     data_iter = iter / data_period;
     grid_dim = nx * ny;
+    dx = XX / nx;
+    dy = YY / ny;
   }
 };
 
@@ -275,10 +289,10 @@ void print_checksum(real_t *elevation, const char *label,
     for (int j = 0; j < config.ny; j++)
       sum += elevation[j * config.nx + i];
 
-  printf("checksum [%s]: %f \n", label, sum);
+  printf("checksum [%s]: %.2f \n", label, sum);
 }
 
-void print_devices() {
+void print_header() {
   int nDevices;
 
   printf("devices:\n");
@@ -287,7 +301,8 @@ void print_devices() {
   for (int i = 0; i < nDevices; i++) {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, i);
-    printf("  %d: %s: %d.%d\n", i, prop.name, prop.major, prop.minor);
+    printf("%d: %s: %d.%d\n", i, prop.name, prop.major, prop.minor);
+    printf("   warp size: %d\n", prop.warpSize);
   }
 }
 
@@ -318,8 +333,8 @@ void launch(const Sim_Configuration config) {
 
   // Allocate the water world memory on both the host and GPU
   real_t *h_water_history;
-  checkCuda(
-      cudaMallocHost(&h_water_history, config.grid_dim * config.data_iter * sizeof(real_t)));
+  checkCuda(cudaMallocHost(
+      &h_water_history, config.grid_dim * config.data_iter * sizeof(real_t)));
   real_t *d_eta, *d_eta_copy, *d_u, *d_v;
   size_t pitch;
   checkCuda(
@@ -335,10 +350,26 @@ void launch(const Sim_Configuration config) {
   checkCuda(cudaMalloc(&d_B, config.ny * sizeof(real_t)));
   means *d_eta_means;
   checkCuda(cudaMalloc(&d_eta_means, sizeof(means)));
+  printf("array pitch: %zu\n", pitch);
 
   // Calculate the dimentions of the 2D GPU compute grid
-  dim3 threadsPerBlock(THREADX, THREADY);
-  dim3 numBlocks(config.nx / threadsPerBlock.x, config.ny / threadsPerBlock.y);
+  dim3 threadsPerBlock;
+  if (config.num_threads == -1) {
+    threadsPerBlock = dim3(THREADX, THREADY);
+  } else {
+    int threads = std::sqrt(config.num_threads);
+    threadsPerBlock = dim3(threads, threads);
+  }
+  printf("threads per block: (%d, %d)\n", threadsPerBlock.x, threadsPerBlock.y);
+  dim3 numBlocks;
+  if (config.num_blocks == -1) {
+    numBlocks =
+        dim3(config.nx / threadsPerBlock.x, config.ny / threadsPerBlock.y);
+  } else {
+    int blocks = std::sqrt(config.num_blocks);
+    numBlocks = dim3(blocks, blocks);
+  }
+  printf("thread blocks: (%d, %d)\n", numBlocks.x, numBlocks.y);
 
   initialize_water<<<numBlocks, threadsPerBlock, 0, stream>>>(
       d_eta, d_u, d_v, pitch, d_A, d_B, *d_eta_means);
@@ -356,11 +387,10 @@ void launch(const Sim_Configuration config) {
                                 cudaMemcpyDeviceToDevice, stream));
     shapiro_filter<<<numBlocks, threadsPerBlock, 0, stream>>>(d_eta_copy, d_eta,
                                                               pitch);
-      
-    
+
     if (t % config.data_period == 0) {
       int i = t / config.data_period;
-      printf("\rdata period: %3d / %3d", i + 1, config.data_iter);
+      printf("\rdata period: %4d / %4d", i + 1, config.data_iter);
       fflush(stdout);
 
       update_elevation_mean<<<numBlocks, threadsPerBlock, 0, stream>>>(
@@ -390,10 +420,11 @@ void launch(const Sim_Configuration config) {
   checkCuda(cudaStreamDestroy(stream));
 
   print_checksum(&h_water_history[0], "first", config);
-  print_checksum(&h_water_history[config.grid_dim * (config.data_iter - 1)], "last", config);
+  print_checksum(&h_water_history[config.grid_dim * (config.data_iter - 1)],
+                 "last", config);
 
   to_file(h_water_history, config);
-  std::cout << "elapsed time: " << time_ms / 1000 << " sec"
+  std::cout << "elapsed time: " << time_ms / 1000 << " s"
             << "\n";
 
   checkCuda(cudaFreeHost(h_water_history));
@@ -402,9 +433,11 @@ void launch(const Sim_Configuration config) {
 int main(int argc, char **argv) {
   auto config = Sim_Configuration({argv, argv + argc});
 
-  print_devices();
+  print_header();
 
-  std::cout << "dimensions: " << config.nx << "x" << config.ny << "\n";
+  printf("dimensions: %dx%d cells\n", config.nx, config.ny);
+  printf("resolution: %dx%d km\n", (int)(config.dx / 1000),
+         (int)(config.dy / 1000));
   std::cout << "iterations: " << config.iter << "\n";
 
   launch(config);
