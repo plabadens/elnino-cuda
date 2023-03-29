@@ -19,6 +19,7 @@
               gnumake
               valgrind
               gcc
+              ffmpeg
               cudaPackages.cudatoolkit
               cudaPackages.nsight_compute
               cmake
